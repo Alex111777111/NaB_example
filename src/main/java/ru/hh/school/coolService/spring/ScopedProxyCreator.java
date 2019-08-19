@@ -1,7 +1,6 @@
 package ru.hh.school.coolService.spring;
 
 /**
- * @author AVUmrikhin.SBT@sberbank.ru
  * 19.08.2019
  */
 
