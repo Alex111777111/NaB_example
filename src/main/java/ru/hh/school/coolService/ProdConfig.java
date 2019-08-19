@@ -1,5 +1,6 @@
 package ru.hh.school.coolService;
 
+import org.springframework.context.ApplicationContext;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.context.annotation.Import;
@@ -15,18 +16,36 @@ import ru.hh.school.coolService.entities.Resume;
 import ru.hh.school.coolService.resources.EmployeeResource;
 
 import javax.sql.DataSource;
+
+import ru.hh.school.coolService.resources.RestTestBean;
 import ru.hh.school.coolService.services.EmployeeService;
+import ru.hh.school.coolService.spring.postProcessor.InjectRestTimeoutBeanPostProcessor;
 
 @Configuration
 @Import({
     CoreProdConfig.class,
     HibernateProdConfig.class,
     EmployeeResource.class,
+
+    InjectRestTimeoutBeanPostProcessor.class,
+
     EmployeeDao.class,
     ResumeDao.class,
     EmployeeService.class
 })
 public class ProdConfig {
+
+    private final ApplicationContext context;
+
+    public ProdConfig(ApplicationContext context) {
+        this.context = context;
+    }
+
+    @Bean
+    public RestTestBean getTestBean() {
+        return new RestTestBean(123);
+    }
+
 
   @Bean
   MappingConfig mappingConfig() {
@@ -43,4 +62,5 @@ public class ProdConfig {
         .addScript("db/sql/create-db.sql")
         .build();
   }
+
 }

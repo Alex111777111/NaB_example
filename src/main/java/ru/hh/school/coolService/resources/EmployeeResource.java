@@ -7,6 +7,9 @@ import javax.ws.rs.Path;
 import javax.ws.rs.PathParam;
 import javax.ws.rs.Produces;
 import javax.ws.rs.core.Response;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.annotation.Configuration;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseBody;
 import ru.hh.school.coolService.dto.EmployeeCreateDto;
@@ -14,11 +17,20 @@ import ru.hh.school.coolService.dto.EmployeeDto;
 import ru.hh.school.coolService.dto.ResumeCreateDto;
 import ru.hh.school.coolService.dto.ResumeDto;
 import ru.hh.school.coolService.services.EmployeeService;
+import ru.hh.school.coolService.spring.RestTimeout;
 
 @Path("/")
+@RestTimeout(key = "resttimeout.sup.param.name", value = "65000")
 @Singleton
 public class EmployeeResource {
-  private final EmployeeService employeeService;
+
+  @Autowired
+  private RestTestBean bean;
+
+/*
+  @Autowired
+*/
+  private EmployeeService employeeService;
 
   public EmployeeResource(EmployeeService employeeService) {
     this.employeeService = employeeService;
@@ -63,5 +75,25 @@ public class EmployeeResource {
         .entity(new ResumeDto(employeeService.createResume(resumeCreateDto)))
         .build();
   }
+
+  @GET
+  @Produces("application/json")
+  @Path("/resume2/{id}")
+  public Response getEchoRequest(@PathParam("id") Integer id) {
+    return Response.status(Response.Status.OK)
+            .entity("\nSome message from server: " + id)
+            .build();
+  }
+
+  @GET
+  @Produces("application/json")
+  @Path("/resume3/{id}")
+  @RestTimeout(key = "getEchoRequest3.timeout.param")
+  public Response getEchoRequest3(@PathParam("id") Integer id) {
+    return Response.status(Response.Status.OK)
+            .entity("\nSome message3 from server: " + id)
+            .build();
+  }
+
 
 }
