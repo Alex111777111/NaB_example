@@ -3,18 +3,13 @@ package ru.hh.school.coolService.spring.postProcessor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.ProxyFactory;
-import org.springframework.asm.Type;
 import org.springframework.beans.BeansException;
-import org.springframework.beans.factory.BeanFactory;
 import org.springframework.beans.factory.config.BeanPostProcessor;
-import org.springframework.cglib.core.ClassGenerator;
-import org.springframework.cglib.core.Constants;
-import org.springframework.cglib.core.DefaultGeneratorStrategy;
 import org.springframework.cglib.core.SpringNamingPolicy;
-import org.springframework.cglib.proxy.*;
-import org.springframework.cglib.transform.ClassEmitterTransformer;
-import org.springframework.cglib.transform.TransformingClassGenerator;
-import org.springframework.lang.Nullable;
+import org.springframework.cglib.proxy.Enhancer;
+import org.springframework.cglib.proxy.Factory;
+import org.springframework.cglib.proxy.MethodInterceptor;
+import org.springframework.cglib.proxy.MethodProxy;
 import org.springframework.objenesis.ObjenesisException;
 import org.springframework.objenesis.SpringObjenesis;
 import org.springframework.util.ClassUtils;
@@ -36,8 +31,6 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
     private static final Logger logger = LoggerFactory.getLogger(InjectRestTimeoutBeanPostProcessor.class);
 
     private Map<String, Class> endpointClasses = new HashMap<>();
-
-    private static final String BEAN_FACTORY_FIELD = "$$beanFactory";
 
 
     private static final SpringObjenesis objenesis = new SpringObjenesis();
@@ -113,7 +106,6 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
                 final Map<String, MethodTimeout> methodTimeouts = endpointTimeouts.get(beanName);
                 if (methodTimeouts != null) {
                     MethodTimeout timeout = methodTimeouts.get(method.getName());
-
 
 
                     Object object = null;
@@ -274,108 +266,6 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
         ((Factory) fbProxy).setCallback(0, callback);
 
         return fbProxy;
-    }
-
-    /**
-     * Conditional {@link Callback}.
-     *
-     * @see ConditionalCallbackFilter
-     */
-    private interface ConditionalCallback extends Callback {
-
-        boolean isMatch(Method candidateMethod);
-    }
-
-
-    /**
-     * A {@link CallbackFilter} that works by interrogating {@link Callback}s in the order
-     * that they are defined via {@link ConditionalCallback}.
-     */
-    private static class ConditionalCallbackFilter implements CallbackFilter {
-
-        private final Callback[] callbacks;
-
-        private final Class<?>[] callbackTypes;
-
-        public ConditionalCallbackFilter(Callback[] callbacks) {
-            this.callbacks = callbacks;
-            this.callbackTypes = new Class<?>[callbacks.length];
-            for (int i = 0; i < callbacks.length; i++) {
-                this.callbackTypes[i] = callbacks[i].getClass();
-            }
-        }
-
-        @Override
-        public int accept(Method method) {
-            for (int i = 0; i < this.callbacks.length; i++) {
-                if (!(this.callbacks[i] instanceof ConditionalCallback) ||
-                        ((ConditionalCallback) this.callbacks[i]).isMatch(method)) {
-                    return i;
-                }
-            }
-            throw new IllegalStateException("No callback available for method " + method.getName());
-        }
-
-        public Class<?>[] getCallbackTypes() {
-            return this.callbackTypes;
-        }
-    }
-
-
-    /**
-     * Custom extension of CGLIB's DefaultGeneratorStrategy, introducing a {@link BeanFactory} field.
-     * Also exposes the application ClassLoader as thread context ClassLoader for the time of
-     * class generation (in order for ASM to pick it up when doing common superclass resolution).
-     */
-    private static class BeanFactoryAwareGeneratorStrategy extends DefaultGeneratorStrategy {
-
-        @Nullable
-        private final ClassLoader classLoader;
-
-        public BeanFactoryAwareGeneratorStrategy(@Nullable ClassLoader classLoader) {
-            this.classLoader = classLoader;
-        }
-
-        @Override
-        protected ClassGenerator transform(ClassGenerator cg) throws Exception {
-            ClassEmitterTransformer transformer = new ClassEmitterTransformer() {
-                @Override
-                public void end_class() {
-                    declare_field(Constants.ACC_PUBLIC, BEAN_FACTORY_FIELD, Type.getType(BeanFactory.class), null);
-                    super.end_class();
-                }
-            };
-            return new TransformingClassGenerator(cg, transformer);
-        }
-
-        @Override
-        public byte[] generate(ClassGenerator cg) throws Exception {
-            if (this.classLoader == null) {
-                return super.generate(cg);
-            }
-
-            Thread currentThread = Thread.currentThread();
-            ClassLoader threadContextClassLoader;
-            try {
-                threadContextClassLoader = currentThread.getContextClassLoader();
-            } catch (Throwable ex) {
-                // Cannot access thread context ClassLoader - falling back...
-                return super.generate(cg);
-            }
-
-            boolean overrideClassLoader = !this.classLoader.equals(threadContextClassLoader);
-            if (overrideClassLoader) {
-                currentThread.setContextClassLoader(this.classLoader);
-            }
-            try {
-                return super.generate(cg);
-            } finally {
-                if (overrideClassLoader) {
-                    // Reset original thread context ClassLoader.
-                    currentThread.setContextClassLoader(threadContextClassLoader);
-                }
-            }
-        }
     }
 
 }
