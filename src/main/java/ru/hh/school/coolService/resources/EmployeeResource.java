@@ -1,15 +1,8 @@
 package ru.hh.school.coolService.resources;
 
-import javax.inject.Singleton;
-import javax.ws.rs.GET;
-import javax.ws.rs.POST;
-import javax.ws.rs.Path;
-import javax.ws.rs.PathParam;
-import javax.ws.rs.Produces;
-import javax.ws.rs.core.Response;
-
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Configuration;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.ResponseBody;
 import ru.hh.school.coolService.dto.EmployeeCreateDto;
@@ -19,10 +12,17 @@ import ru.hh.school.coolService.dto.ResumeDto;
 import ru.hh.school.coolService.services.EmployeeService;
 import ru.hh.school.coolService.spring.RestTimeout;
 
+import javax.inject.Singleton;
+import javax.ws.rs.*;
+import javax.ws.rs.core.Response;
+
 @Path("/")
 @RestTimeout(key = "resttimeout.sup.param.name", value = "65000")
 @Singleton
 public class EmployeeResource {
+
+  public static final int MILLIS = 60000;
+  Logger logger = LoggerFactory.getLogger(getClass());
 
   @Autowired
   private RestTestBean bean;
@@ -88,12 +88,31 @@ public class EmployeeResource {
   @GET
   @Produces("application/json")
   @Path("/resume3/{id}")
-  @RestTimeout(key = "getEchoRequest3.timeout.param")
-  public Response getEchoRequest3(@PathParam("id") Integer id) {
-    return Response.status(Response.Status.OK)
+  @RestTimeout(key = "getEchoRequest3.timeout.param", value = "20000")
+  public Response getEchoRequest3(@PathParam("id") Integer id) throws InterruptedException {
+    logger.info("===> getEchoRequest3(): " + id);
+
+/*
+    try {
+*/
+      logger.info("getEchoRequest3(): thread sleeping " + MILLIS);
+      Thread.sleep(MILLIS);
+/*
+    } catch (InterruptedException e) {
+      logger.error("getEchoRequest3(): " + e.getMessage(), e);
+    }
+*/
+
+    final Response res = Response.status(Response.Status.OK)
             .entity("\nSome message3 from server: " + id)
             .build();
+    logger.info("<=== getEchoRequest3(): " + id + ", " + res.toString());
+    return res;
   }
 
+
+  public String getTest() {
+    return "22244455";
+  }
 
 }

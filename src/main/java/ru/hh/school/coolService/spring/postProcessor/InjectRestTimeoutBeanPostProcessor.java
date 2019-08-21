@@ -1,19 +1,12 @@
 package ru.hh.school.coolService.spring.postProcessor;
 
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.aop.framework.ProxyFactory;
-import org.springframework.aop.scope.ScopedProxyFactoryBean;
 import org.springframework.asm.Type;
 import org.springframework.beans.BeansException;
 import org.springframework.beans.factory.BeanFactory;
-import org.springframework.beans.factory.BeanFactoryAware;
-import org.springframework.beans.factory.NoSuchBeanDefinitionException;
-import org.springframework.beans.factory.config.BeanDefinition;
-import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
 import org.springframework.beans.factory.config.BeanPostProcessor;
-import org.springframework.beans.factory.config.ConfigurableBeanFactory;
-import org.springframework.beans.factory.support.SimpleInstantiationStrategy;
 import org.springframework.cglib.core.ClassGenerator;
 import org.springframework.cglib.core.Constants;
 import org.springframework.cglib.core.DefaultGeneratorStrategy;
@@ -21,51 +14,34 @@ import org.springframework.cglib.core.SpringNamingPolicy;
 import org.springframework.cglib.proxy.*;
 import org.springframework.cglib.transform.ClassEmitterTransformer;
 import org.springframework.cglib.transform.TransformingClassGenerator;
-import org.springframework.context.annotation.*;
-import org.springframework.core.annotation.AnnotatedElementUtils;
 import org.springframework.lang.Nullable;
 import org.springframework.objenesis.ObjenesisException;
 import org.springframework.objenesis.SpringObjenesis;
-import org.springframework.util.Assert;
 import org.springframework.util.ClassUtils;
-import org.springframework.util.ObjectUtils;
 import org.springframework.util.ReflectionUtils;
-import ru.hh.school.coolService.spring.BeanAnnotationHelper;
 import ru.hh.school.coolService.spring.MethodTimeout;
 import ru.hh.school.coolService.spring.RestTimeout;
-import ru.hh.school.coolService.spring.ScopedProxyCreator;
+import ru.hh.school.coolService.spring.timeout.ThreadMonitoring;
 
 import javax.ws.rs.Path;
 import java.lang.annotation.Annotation;
-import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.lang.reflect.Modifier;
-import java.lang.reflect.Proxy;
-import java.util.Arrays;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
 
 
-
-    private static final Log logger = LogFactory.getLog(InjectRestTimeoutBeanPostProcessor.class);
+    private static final Logger logger = LoggerFactory.getLogger(InjectRestTimeoutBeanPostProcessor.class);
 
     private Map<String, Class> endpointClasses = new HashMap<>();
 
     private static final String BEAN_FACTORY_FIELD = "$$beanFactory";
 
-    // The callbacks to use. Note that these callbacks must be stateless.
-    private static final Callback[] CALLBACKS = new Callback[] {
-            new BeanMethodInterceptor(),
-            new BeanFactoryAwareMethodInterceptor(),
-            NoOp.INSTANCE
-    };
-
 
     private static final SpringObjenesis objenesis = new SpringObjenesis();
 
-    private static final ConditionalCallbackFilter CALLBACK_FILTER = new ConditionalCallbackFilter(CALLBACKS);
 
     /**
      * <bean, <method, timeout>>
@@ -74,7 +50,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
 
     @Override
     public Object postProcessBeforeInitialization(Object bean, String beanName) throws BeansException {
-        System.out.println("===> postProcessBeforeInitialization(): " + beanName);
+        logger.info("===> postProcessBeforeInitialization(): " + beanName);
         final Class<?> beanClass = bean.getClass();
         for (Annotation annotation : beanClass.getDeclaredAnnotations()) {
             if (annotation.annotationType().equals(Path.class)) {
@@ -86,6 +62,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
 
     /**
      * Create proxy over EndPoint (@Path) with timeout from SUP on Class/method
+     *
      * @param bean
      * @param beanName
      * @return
@@ -93,7 +70,8 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
      */
     @Override
     public Object postProcessAfterInitialization(Object bean, String beanName) throws BeansException {
-        System.out.println("===> postProcessAfterInitialization(): " + beanName);
+        logger.info("===> postProcessAfterInitialization(): " + beanName);
+
         final Class endpointClass = endpointClasses.get(beanName);
         if (endpointClass == null) {
             return bean;
@@ -108,7 +86,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
             } else if (classTimeout != null) {
                 methodTimeouts.put(method.getName(), getTimeout(classTimeout));
             } else {
-                System.out.println("postProcessAfterInitialization(): no timeouts bean - " + beanName);
+                logger.error("postProcessAfterInitialization(): no timeouts bean - " + beanName);
             }
         }
         endpointTimeouts.put(beanName, methodTimeouts);
@@ -125,34 +103,103 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
         Object aopProxy = getAopProxy(bean);
 
         MethodInterceptor callback = new MethodInterceptor() {
+
+
+            private ThreadMonitoring threadMonitor = new ThreadMonitoring(3, "HttpTimeoutPool");
+
             @Override
             public Object intercept(Object o, Method method, Object[] objects, MethodProxy methodProxy) throws Throwable {
-                System.out.println("===> intercept(): " + beanName);
+                logger.info("===> intercept(): " + beanName);
                 final Map<String, MethodTimeout> methodTimeouts = endpointTimeouts.get(beanName);
                 if (methodTimeouts != null) {
-                    final MethodTimeout timeout = methodTimeouts.get(method.getName());
-                    System.out.println("bean: " + beanName +", method: " + method.getName() + ", timeout: " + timeout);
-                }
+                    MethodTimeout timeout = methodTimeouts.get(method.getName());
 
+
+
+                    Object object = null;
+                    if (objects.length > 0) {
+                        object = objects[0];
+                    }
+                    logger.info("bean: " + beanName + ", param: " + object + ", method: " + method.getName() + ", timeout: " + timeout);
+
+                    initTimeoutService(timeout);
+                }
                 return methodProxy.invoke(bean, objects);
             }
+
+            private void initTimeoutService(MethodTimeout methodTimeout) {
+                long timeout = getTimeout(methodTimeout);
+
+                if (timeout > 0) {
+                    final Thread parentThread = Thread.currentThread();
+                    threadMonitor.put(new Runnable() {
+                        @Override
+                        public void run() {
+                            if (parentThread.isAlive() && !parentThread.isInterrupted()) {
+                                logger.warn("Request processing time exceeded {} ms. Interrupting thread {}", timeout, parentThread.getName());
+                                //TODO send Errors Timeout Response
+
+                                parentThread.interrupt();
+                            }
+                        }
+                    }, timeout, TimeUnit.MILLISECONDS);
+                }
+
+/*
+                final HttpServletRequest httpRequest = ServletUtil.getHttpRequest();
+                final HttpServletResponse httpResponse = ServletUtil.getHttpResponse();
+                if (httpRequest != null) {
+                    UfsHttpRequestWrapper request = new UfsHttpRequestWrapper(httpRequest, httpResponse, null, null);
+                    UfsHttpResponseWrapper response = new UfsHttpResponseWrapper(request, httpResponse);
+                    timeoutService.installTimeoutListener(request, response);
+                }
+*/
+            }
+
+            private long getTimeout(MethodTimeout methodTimeout) {
+                long timeout = -1;
+                try {
+                    timeout = Long.parseLong(methodTimeout.getValue());
+                } catch (Exception e) {
+                    logger.error(e.getMessage(), e);
+                }
+                return timeout;
+            }
+
+
         };
 
         ClassLoader classloader = ClassUtils.getDefaultClassLoader();
+/*
         Class<?> enhanceClass = enhance(bean.getClass(), classloader);
+*/
         try {
+
+/*
+            Enhancer enhancer = new Enhancer();
+            enhancer.setStrategy(new BeanFactoryAwareGeneratorStrategy(classloader));
+            enhancer.setSuperclass(enhanceClass);
+            enhancer.setCallback(callback);
+
+            Object proxy = enhancer.create();
+*/
+
+            Object proxy = createCglibProxyForFactoryBean(bean, callback);
+
+/*
             Object proxy = Enhancer.create(enhanceClass, callback);
+*/
+
 /*
             Object proxy = Enhancer.create(bean.getClass(), callback);
 */
             return proxy;
         } catch (Exception e) {
-            System.out.println("ERROR!: " + e.getMessage());
-            e.printStackTrace();
-
+            logger.error("ERROR!: " + beanName + ", " + bean.getClass() + ", " + e.getMessage(), e);
             return bean;
         }
     }
+
 
     private MethodTimeout getTimeout(RestTimeout timeoutAnnotation) {
         MethodTimeout timeout = new MethodTimeout();
@@ -170,7 +217,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
     private RestTimeout getRestTimeout(Annotation[] annotations) {
         for (Annotation annotation : annotations) {
             if (annotation.annotationType().equals(RestTimeout.class)) {
-                return (RestTimeout)annotation;
+                return (RestTimeout) annotation;
             }
         }
         return null;
@@ -179,67 +226,59 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
 
     // Создание прокси, используя параметризованный конструктор
 
-    private Class<?> enhance(Class<?> configClass, ClassLoader classLoader) {
-        Class<?> enhancedClass = createClass(newEnhancer(configClass, classLoader));
-        if (logger.isDebugEnabled()) {
-            logger.debug(String.format("Successfully enhanced %s; enhanced class name is: %s",
-                    configClass.getName(), enhancedClass.getName()));
-        }
-        return enhancedClass;
-    }
+    private Object createCglibProxyForFactoryBean(Object factoryBean, MethodInterceptor callback) {
+/*
+    private Object createCglibProxyForFactoryBean(final Object factoryBean,
+                                                  final ConfigurableBeanFactory beanFactory, final String beanName) {
+*/
 
-    /**
-     * Uses enhancer to generate a subclass of superclass,
-     * ensuring that callbacks are registered for the new subclass.
-     */
-    private Class<?> createClass(Enhancer enhancer) {
-        Class<?> subclass = enhancer.createClass();
-        // Registering callbacks statically (as opposed to thread-local)
-        // is critical for usage in an OSGi environment (SPR-5932)...
-        Enhancer.registerStaticCallbacks(subclass, CALLBACKS);
-        return subclass;
-    }
-
-
-
-    /**
-     * Creates a new CGLIB {@link Enhancer} instance.
-     */
-    private Enhancer newEnhancer(Class<?> superclass, @Nullable ClassLoader classLoader) {
         Enhancer enhancer = new Enhancer();
-        enhancer.setSuperclass(superclass);
-        enhancer.setInterfaces(new Class<?>[] {EnhancedConfiguration.class});
-        enhancer.setUseFactory(false);
+        enhancer.setSuperclass(factoryBean.getClass());
         enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);
-        enhancer.setStrategy(new BeanFactoryAwareGeneratorStrategy(classLoader));
-        enhancer.setCallbackFilter(CALLBACK_FILTER);
-        enhancer.setCallbackTypes(CALLBACK_FILTER.getCallbackTypes());
-        return enhancer;
+        enhancer.setCallbackType(MethodInterceptor.class);
+
+        // Ideally create enhanced FactoryBean proxy without constructor side effects,
+        // analogous to AOP proxy creation in ObjenesisCglibAopProxy...
+        Class<?> fbClass = enhancer.createClass();
+        Object fbProxy = null;
+
+        if (objenesis.isWorthTrying()) {
+            try {
+                fbProxy = objenesis.newInstance(fbClass, enhancer.getUseCache());
+            } catch (ObjenesisException ex) {
+                logger.debug("Unable to instantiate enhanced FactoryBean using Objenesis, " +
+                        "falling back to regular construction", ex);
+            }
+        }
+
+        if (fbProxy == null) {
+            try {
+                fbProxy = ReflectionUtils.accessibleConstructor(fbClass).newInstance();
+            } catch (Throwable ex) {
+                throw new IllegalStateException("Unable to instantiate enhanced FactoryBean using Objenesis, " +
+                        "and regular FactoryBean instantiation via default constructor fails as well", ex);
+            }
+        }
+
+/*
+        ((Factory) fbProxy).setCallback(0, new MethodInterceptor() {
+            @Override
+            public Object intercept(Object obj, Method method, Object[] args, MethodProxy proxy) throws Throwable {
+                if (method.getName().equals("getObject") && args.length == 0) {
+                    return beanFactory.getBean(beanName);
+                }
+                return proxy.invoke(factoryBean, args);
+            }
+        });
+*/
+        ((Factory) fbProxy).setCallback(0, callback);
+
+        return fbProxy;
     }
-
-
-
-
-
-
-
-    /**
-     * Marker interface to be implemented by all @Configuration CGLIB subclasses.
-     * Facilitates idempotent behavior for {@link InjectRestTimeoutBeanPostProcessor#enhance}
-     * through checking to see if candidate classes are already assignable to it, e.g.
-     * have already been enhanced.
-     * <p>Also extends {@link BeanFactoryAware}, as all enhanced {@code @Configuration}
-     * classes require access to the {@link BeanFactory} that created them.
-     * <p>Note that this interface is intended for framework-internal use only, however
-     * must remain public in order to allow access to subclasses generated from other
-     * packages (i.e. user code).
-     */
-    public interface EnhancedConfiguration extends BeanFactoryAware {
-    }
-
 
     /**
      * Conditional {@link Callback}.
+     *
      * @see ConditionalCallbackFilter
      */
     private interface ConditionalCallback extends Callback {
@@ -283,8 +322,6 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
     }
 
 
-
-
     /**
      * Custom extension of CGLIB's DefaultGeneratorStrategy, introducing a {@link BeanFactory} field.
      * Also exposes the application ClassLoader as thread context ClassLoader for the time of
@@ -321,8 +358,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
             ClassLoader threadContextClassLoader;
             try {
                 threadContextClassLoader = currentThread.getContextClassLoader();
-            }
-            catch (Throwable ex) {
+            } catch (Throwable ex) {
                 // Cannot access thread context ClassLoader - falling back...
                 return super.generate(cg);
             }
@@ -333,8 +369,7 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
             }
             try {
                 return super.generate(cg);
-            }
-            finally {
+            } finally {
                 if (overrideClassLoader) {
                     // Reset original thread context ClassLoader.
                     currentThread.setContextClassLoader(threadContextClassLoader);
@@ -342,321 +377,5 @@ public class InjectRestTimeoutBeanPostProcessor implements BeanPostProcessor {
             }
         }
     }
-
-    /**
-     * Intercepts the invocation of any {@link BeanFactoryAware#setBeanFactory(BeanFactory)} on
-     * {@code @Configuration} class instances for the purpose of recording the {@link BeanFactory}.
-     * @see EnhancedConfiguration
-     */
-    private static class BeanFactoryAwareMethodInterceptor implements MethodInterceptor, ConditionalCallback {
-
-        @Override
-        @Nullable
-        public Object intercept(Object obj, Method method, Object[] args, MethodProxy proxy) throws Throwable {
-            Field field = ReflectionUtils.findField(obj.getClass(), BEAN_FACTORY_FIELD);
-            Assert.state(field != null, "Unable to find generated BeanFactory field");
-            field.set(obj, args[0]);
-
-            // Does the actual (non-CGLIB) superclass implement BeanFactoryAware?
-            // If so, call its setBeanFactory() method. If not, just exit.
-            if (BeanFactoryAware.class.isAssignableFrom(ClassUtils.getUserClass(obj.getClass().getSuperclass()))) {
-                return proxy.invokeSuper(obj, args);
-            }
-            return null;
-        }
-
-        @Override
-        public boolean isMatch(Method candidateMethod) {
-            return (candidateMethod.getName().equals("setBeanFactory") &&
-                    candidateMethod.getParameterCount() == 1 &&
-                    BeanFactory.class == candidateMethod.getParameterTypes()[0] &&
-                    BeanFactoryAware.class.isAssignableFrom(candidateMethod.getDeclaringClass()));
-        }
-    }
-
-
-
-    /**
-     * Intercepts the invocation of any {@link Bean}-annotated methods in order to ensure proper
-     * handling of bean semantics such as scoping and AOP proxying.
-     * @see Bean
-     * @see InjectRestTimeoutBeanPostProcessor // ConfigurationClassEnhancer
-     */
-    private static class BeanMethodInterceptor implements MethodInterceptor, ConditionalCallback {
-
-        /**
-         * Enhance a {@link Bean @Bean} method to check the supplied BeanFactory for the
-         * existence of this bean object.
-         * @throws Throwable as a catch-all for any exception that may be thrown when invoking the
-         * super implementation of the proxied method i.e., the actual {@code @Bean} method
-         */
-        @Override
-        @Nullable
-        public Object intercept(Object enhancedConfigInstance, Method beanMethod, Object[] beanMethodArgs,
-                                MethodProxy cglibMethodProxy) throws Throwable {
-
-            ConfigurableBeanFactory beanFactory = getBeanFactory(enhancedConfigInstance);
-            String beanName = BeanAnnotationHelper.determineBeanNameFor(beanMethod);
-
-            // Determine whether this bean is a scoped-proxy
-            Scope scope = AnnotatedElementUtils.findMergedAnnotation(beanMethod, Scope.class);
-            if (scope != null && scope.proxyMode() != ScopedProxyMode.NO) {
-                String scopedBeanName = ScopedProxyCreator.getTargetBeanName(beanName);
-                if (beanFactory.isCurrentlyInCreation(scopedBeanName)) {
-                    beanName = scopedBeanName;
-                }
-            }
-
-            // To handle the case of an inter-bean method reference, we must explicitly check the
-            // container for already cached instances.
-
-            // First, check to see if the requested bean is a FactoryBean. If so, create a subclass
-            // proxy that intercepts calls to getObject() and returns any cached bean instance.
-            // This ensures that the semantics of calling a FactoryBean from within @Bean methods
-            // is the same as that of referring to a FactoryBean within XML. See SPR-6602.
-            if (factoryContainsBean(beanFactory, BeanFactory.FACTORY_BEAN_PREFIX + beanName) &&
-                    factoryContainsBean(beanFactory, beanName)) {
-                Object factoryBean = beanFactory.getBean(BeanFactory.FACTORY_BEAN_PREFIX + beanName);
-                if (factoryBean instanceof ScopedProxyFactoryBean) {
-                    // Scoped proxy factory beans are a special case and should not be further proxied
-                }
-                else {
-                    // It is a candidate FactoryBean - go ahead with enhancement
-                    return enhanceFactoryBean(factoryBean, beanMethod.getReturnType(), beanFactory, beanName);
-                }
-            }
-
-            if (isCurrentlyInvokedFactoryMethod(beanMethod)) {
-                // The factory is calling the bean method in order to instantiate and register the bean
-                // (i.e. via a getBean() call) -> invoke the super implementation of the method to actually
-                // create the bean instance.
-                if (logger.isWarnEnabled() &&
-                        BeanFactoryPostProcessor.class.isAssignableFrom(beanMethod.getReturnType())) {
-                    logger.warn(String.format("@Bean method %s.%s is non-static and returns an object " +
-                                    "assignable to Spring's BeanFactoryPostProcessor interface. This will " +
-                                    "result in a failure to process annotations such as @Autowired, " +
-                                    "@Resource and @PostConstruct within the method's declaring " +
-                                    "@Configuration class. Add the 'static' modifier to this method to avoid " +
-                                    "these container lifecycle issues; see @Bean javadoc for complete details.",
-                            beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName()));
-                }
-                return cglibMethodProxy.invokeSuper(enhancedConfigInstance, beanMethodArgs);
-            }
-
-            return resolveBeanReference(beanMethod, beanMethodArgs, beanFactory, beanName);
-        }
-
-        private Object resolveBeanReference(Method beanMethod, Object[] beanMethodArgs,
-                                            ConfigurableBeanFactory beanFactory, String beanName) {
-
-            // The user (i.e. not the factory) is requesting this bean through a call to
-            // the bean method, direct or indirect. The bean may have already been marked
-            // as 'in creation' in certain autowiring scenarios; if so, temporarily set
-            // the in-creation status to false in order to avoid an exception.
-            boolean alreadyInCreation = beanFactory.isCurrentlyInCreation(beanName);
-            try {
-                if (alreadyInCreation) {
-                    beanFactory.setCurrentlyInCreation(beanName, false);
-                }
-                boolean useArgs = !ObjectUtils.isEmpty(beanMethodArgs);
-                if (useArgs && beanFactory.isSingleton(beanName)) {
-                    // Stubbed null arguments just for reference purposes,
-                    // expecting them to be autowired for regular singleton references?
-                    // A safe assumption since @Bean singleton arguments cannot be optional...
-                    for (Object arg : beanMethodArgs) {
-                        if (arg == null) {
-                            useArgs = false;
-                            break;
-                        }
-                    }
-                }
-                Object beanInstance = (useArgs ? beanFactory.getBean(beanName, beanMethodArgs) :
-                        beanFactory.getBean(beanName));
-                if (!ClassUtils.isAssignableValue(beanMethod.getReturnType(), beanInstance)) {
-                    if (beanInstance.equals(null)) {
-                        if (logger.isDebugEnabled()) {
-                            logger.debug(String.format("@Bean method %s.%s called as bean reference " +
-                                            "for type [%s] returned null bean; resolving to null value.",
-                                    beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName(),
-                                    beanMethod.getReturnType().getName()));
-                        }
-                        beanInstance = null;
-                    }
-                    else {
-                        String msg = String.format("@Bean method %s.%s called as bean reference " +
-                                        "for type [%s] but overridden by non-compatible bean instance of type [%s].",
-                                beanMethod.getDeclaringClass().getSimpleName(), beanMethod.getName(),
-                                beanMethod.getReturnType().getName(), beanInstance.getClass().getName());
-                        try {
-                            BeanDefinition beanDefinition = beanFactory.getMergedBeanDefinition(beanName);
-                            msg += " Overriding bean of same name declared in: " + beanDefinition.getResourceDescription();
-                        }
-                        catch (NoSuchBeanDefinitionException ex) {
-                            // Ignore - simply no detailed message then.
-                        }
-                        throw new IllegalStateException(msg);
-                    }
-                }
-                Method currentlyInvoked = SimpleInstantiationStrategy.getCurrentlyInvokedFactoryMethod();
-                if (currentlyInvoked != null) {
-                    String outerBeanName = BeanAnnotationHelper.determineBeanNameFor(currentlyInvoked);
-                    beanFactory.registerDependentBean(beanName, outerBeanName);
-                }
-                return beanInstance;
-            }
-            finally {
-                if (alreadyInCreation) {
-                    beanFactory.setCurrentlyInCreation(beanName, true);
-                }
-            }
-        }
-
-        @Override
-        public boolean isMatch(Method candidateMethod) {
-            return BeanAnnotationHelper.isBeanAnnotated(candidateMethod);
-        }
-
-        private ConfigurableBeanFactory getBeanFactory(Object enhancedConfigInstance) {
-            Field field = ReflectionUtils.findField(enhancedConfigInstance.getClass(), BEAN_FACTORY_FIELD);
-            Assert.state(field != null, "Unable to find generated bean factory field");
-            Object beanFactory = ReflectionUtils.getField(field, enhancedConfigInstance);
-            Assert.state(beanFactory != null, "BeanFactory has not been injected into @Configuration class");
-            Assert.state(beanFactory instanceof ConfigurableBeanFactory,
-                    "Injected BeanFactory is not a ConfigurableBeanFactory");
-            return (ConfigurableBeanFactory) beanFactory;
-        }
-
-        /**
-         * Check the BeanFactory to see whether the bean named <var>beanName</var> already
-         * exists. Accounts for the fact that the requested bean may be "in creation", i.e.:
-         * we're in the middle of servicing the initial request for this bean. From an enhanced
-         * factory method's perspective, this means that the bean does not actually yet exist,
-         * and that it is now our job to create it for the first time by executing the logic
-         * in the corresponding factory method.
-         * <p>Said another way, this check repurposes
-         * {@link ConfigurableBeanFactory#isCurrentlyInCreation(String)} to determine whether
-         * the container is calling this method or the user is calling this method.
-         * @param beanName name of bean to check for
-         * @return whether <var>beanName</var> already exists in the factory
-         */
-        private boolean factoryContainsBean(ConfigurableBeanFactory beanFactory, String beanName) {
-            return (beanFactory.containsBean(beanName) && !beanFactory.isCurrentlyInCreation(beanName));
-        }
-
-        /**
-         * Check whether the given method corresponds to the container's currently invoked
-         * factory method. Compares method name and parameter types only in order to work
-         * around a potential problem with covariant return types (currently only known
-         * to happen on Groovy classes).
-         */
-        private boolean isCurrentlyInvokedFactoryMethod(Method method) {
-            Method currentlyInvoked = SimpleInstantiationStrategy.getCurrentlyInvokedFactoryMethod();
-            return (currentlyInvoked != null && method.getName().equals(currentlyInvoked.getName()) &&
-                    Arrays.equals(method.getParameterTypes(), currentlyInvoked.getParameterTypes()));
-        }
-
-        /**
-         * Create a subclass proxy that intercepts calls to getObject(), delegating to the current BeanFactory
-         * instead of creating a new instance. These proxies are created only when calling a FactoryBean from
-         * within a Bean method, allowing for proper scoping semantics even when working against the FactoryBean
-         * instance directly. If a FactoryBean instance is fetched through the container via &-dereferencing,
-         * it will not be proxied. This too is aligned with the way XML configuration works.
-         */
-        private Object enhanceFactoryBean(final Object factoryBean, Class<?> exposedType,
-                                          final ConfigurableBeanFactory beanFactory, final String beanName) {
-
-            try {
-                Class<?> clazz = factoryBean.getClass();
-                boolean finalClass = Modifier.isFinal(clazz.getModifiers());
-                boolean finalMethod = Modifier.isFinal(clazz.getMethod("getObject").getModifiers());
-                if (finalClass || finalMethod) {
-                    if (exposedType.isInterface()) {
-                        if (logger.isDebugEnabled()) {
-                            logger.debug("Creating interface proxy for FactoryBean '" + beanName + "' of type [" +
-                                    clazz.getName() + "] for use within another @Bean method because its " +
-                                    (finalClass ? "implementation class" : "getObject() method") +
-                                    " is final: Otherwise a getObject() call would not be routed to the factory.");
-                        }
-                        return createInterfaceProxyForFactoryBean(factoryBean, exposedType, beanFactory, beanName);
-                    }
-                    else {
-                        if (logger.isInfoEnabled()) {
-                            logger.info("Unable to proxy FactoryBean '" + beanName + "' of type [" +
-                                    clazz.getName() + "] for use within another @Bean method because its " +
-                                    (finalClass ? "implementation class" : "getObject() method") +
-                                    " is final: A getObject() call will NOT be routed to the factory. " +
-                                    "Consider declaring the return type as a FactoryBean interface.");
-                        }
-                        return factoryBean;
-                    }
-                }
-            }
-            catch (NoSuchMethodException ex) {
-                // No getObject() method -> shouldn't happen, but as long as nobody is trying to call it...
-            }
-
-            return createCglibProxyForFactoryBean(factoryBean, beanFactory, beanName);
-        }
-
-        private Object createInterfaceProxyForFactoryBean(final Object factoryBean, Class<?> interfaceType,
-                                                          final ConfigurableBeanFactory beanFactory, final String beanName) {
-
-            return Proxy.newProxyInstance(
-                    factoryBean.getClass().getClassLoader(), new Class<?>[] {interfaceType},
-                    (proxy, method, args) -> {
-                        if (method.getName().equals("getObject") && args == null) {
-                            return beanFactory.getBean(beanName);
-                        }
-                        return ReflectionUtils.invokeMethod(method, factoryBean, args);
-                    });
-        }
-
-        private Object createCglibProxyForFactoryBean(final Object factoryBean,
-                                                      final ConfigurableBeanFactory beanFactory, final String beanName) {
-
-            Enhancer enhancer = new Enhancer();
-            enhancer.setSuperclass(factoryBean.getClass());
-            enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);
-            enhancer.setCallbackType(MethodInterceptor.class);
-
-            // Ideally create enhanced FactoryBean proxy without constructor side effects,
-            // analogous to AOP proxy creation in ObjenesisCglibAopProxy...
-            Class<?> fbClass = enhancer.createClass();
-            Object fbProxy = null;
-
-            if (objenesis.isWorthTrying()) {
-                try {
-                    fbProxy = objenesis.newInstance(fbClass, enhancer.getUseCache());
-                }
-                catch (ObjenesisException ex) {
-                    logger.debug("Unable to instantiate enhanced FactoryBean using Objenesis, " +
-                            "falling back to regular construction", ex);
-                }
-            }
-
-            if (fbProxy == null) {
-                try {
-                    fbProxy = ReflectionUtils.accessibleConstructor(fbClass).newInstance();
-                }
-                catch (Throwable ex) {
-                    throw new IllegalStateException("Unable to instantiate enhanced FactoryBean using Objenesis, " +
-                            "and regular FactoryBean instantiation via default constructor fails as well", ex);
-                }
-            }
-
-            ((Factory) fbProxy).setCallback(0, new MethodInterceptor() {
-                @Override
-                public Object intercept(Object obj, Method method, Object[] args, MethodProxy proxy) throws Throwable {
-                    if (method.getName().equals("getObject") && args.length == 0) {
-                        return beanFactory.getBean(beanName);
-                    }
-                    return proxy.invoke(factoryBean, args);
-                }
-            });
-
-            return fbProxy;
-        }
-    }
-
 
 }

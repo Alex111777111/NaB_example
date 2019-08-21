@@ -4,4 +4,18 @@
     <contextName>example</contextName>
 
     <include resource="shared-logback.xml"/>
+
+<!--
+    <root level="WARN">
+-->
+    <root level="INFO">
+        <appender-ref ref="asyncService"/>
+        <appender-ref ref="Sentry"/>
+        <if condition='"true".equals(property("log.toConsole"))'>
+            <then>
+                <appender-ref ref="CONSOLE"/>
+            </then>
+        </if>
+    </root>
+
 </configuration>
